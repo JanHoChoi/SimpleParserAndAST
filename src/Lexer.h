@@ -1,4 +1,4 @@
-// 词法分析器
+// 词法分析器，把用户输入的字符串翻译成一个个Token
 
 #ifndef LEXER_HPP
 #define LEXER_HPP
@@ -11,6 +11,7 @@
 #include <map>
 #include "AST.h"
 
+/// GetToken返回的结果要么是未知意义的字符[0~255]的ascii码，或者这些满足pattern的token
 enum Token {
 	tok_eof = -1,
 	tok_def = -2,
@@ -54,7 +55,6 @@ static int GetToken() {
 	{
 		std::string NumStr;
 		do {
-			// if (LastChar )
 			NumStr += LastChar;
 			LastChar = getchar();
 		} while(isdigit(LastChar) || LastChar == '.');
@@ -121,21 +121,21 @@ static int GetTokPrecedence()
 #pragma region 报错辅助
 
 // 区分了三种Error函数，返回值类型不同
-ExprAST* Error(const char *Str)
+std::unique_ptr<ExprAST> LogError(const char *Str)
 {
-	fprintf(stderr, "Error: %s\n", Str);
+	fprintf(stderr, "LogError: %s\n", Str);
 	return nullptr;
 }
 
-PrototypeAST* ErrorP(const char *Str)
+std::unique_ptr<PrototypeAST> LogErrorP(const char *Str)
 {
-	Error(Str);
+	LogError(Str);
 	return nullptr;
 }
 
-FunctionAST* ErrorF(const char *Str)
+std::unique_ptr<FunctionAST> LogErrorF(const char *Str)
 {
-	Error(Str);
+	LogError(Str);
 	return nullptr;
 }
 
@@ -143,18 +143,18 @@ FunctionAST* ErrorF(const char *Str)
 
 #pragma region 解析当前Token
 
-static ExprAST* ParseIdentifierExpr();
-static ExprAST* ParseNumberExpr();
-static ExprAST* ParseParenExpr();
-static ExprAST* ParseBinOpRHS(int ExprPrec, ExprAST *LHS);
-static PrototypeAST* ParsePrototype();
+static std::unique_ptr<ExprAST> ParseIdentifierExpr();
+static std::unique_ptr<ExprAST> ParseNumberExpr();
+static std::unique_ptr<ExprAST> ParseParenExpr();
+static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST *LHS);
+static std::unique_ptr<PrototypeAST> ParsePrototype();
 
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
 ///   ::= parenexpr
-/// 获取表达式统一的入口，返回的为Error或是一个完整的表达式
-static ExprAST* ParsePrimary()
+/// 获取表达式统一的入口，返回的为Error或是一个完整的expr
+static std::unique_ptr<ExprAST> ParsePrimary()
 {
 	switch (CurTok)
 	{
@@ -170,11 +170,10 @@ static ExprAST* ParsePrimary()
 }
 
 /// expression
-///   ::= primary binoprhs ->
-///
-static ExprAST* ParseExpression()
+///   ::= primary binoprhs
+static std::unique_ptr<ExprAST> ParseExpression()
 {
-	ExprAST *LHS = ParsePrimary();	// 解析出第一个主表达式
+	auto LHS = ParsePrimary();	// 确定LHS是一个完整的主表达式
 	if (!LHS)
 		return nullptr;
 
@@ -183,7 +182,8 @@ static ExprAST* ParseExpression()
 
 /// binoprhs
 ///   ::= ('+' primary)*
-static ExprAST* ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
+/// 递归调用
+static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
 {
 	// If this is a binop, find its precedence.
 	while (1)
@@ -207,7 +207,6 @@ static ExprAST* ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
 		//	①(LHS BinOp RHS) NextBinOp unparsed...
 		//	②LHS BinOp (RHS NextBinOp unparsed...)
 		// 所以我们需要判断NextBinOp的优先级再做决定
-
 		int NextPrec = GetTokPrecedence();
 		if (TokPrec < NextPrec)		// 分支②
 		{
@@ -217,28 +216,28 @@ static ExprAST* ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
 			if (!RHS)
 				return nullptr;
 		}
-		LHS = new BinaryExprAST(BinOp, LHS, RHS);	// 直接把当前的（LHS BinOp RHS）构造成一个子节点作为新的LHS
+		LHS = new BinaryExprAST(BinOp, LHS, RHS);	// 直接把当前的（LHS BinOp RHS）构造成一个AST节点作为新的LHS
 	}
 }
 
 /// numberexpr ::= number
-static ExprAST* ParseNumberExpr()
+static std::unique_ptr<ExprAST> ParseNumberExpr()
 {
-	ExprAST* Result = new NumberExprAST(NumVal);
-	GetNextToken();	// 刷新CurTok
-	return Result;
+	auto Result = llvm::make_unique<NumberExprAST>(NumVal);
+	GetNextToken();	// eat number. 刷新CurTok
+	return std::move(Result);
 }
 
 /// parenexpr ::= '(' expression ')'
-static ExprAST* ParseParenExpr()
+static std::unique_ptr<ExprAST> ParseParenExpr()
 {
 	GetNextToken(); // eat '('.
-	ExprAST *V = ParseExpression();
+	auto V = ParseExpression();
 	if (!V)
 		return nullptr;
 
 	if (CurTok != ')')
-		return Error("expected ')'");
+		return LogError("expected ')'");
 	GetNextToken(); // eat ')'. 刷新CurTok
 	return V;
 }
@@ -247,37 +246,39 @@ static ExprAST* ParseParenExpr()
 ///   ::= identifier
 ///   ::= identifier '(' expression* ')'
 // 调用该函数时，CurTok必须是tok_identifier
-static ExprAST* ParseIdentifierExpr()
+/// var / var(a,b)
+static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 {
 	std::string IdName = IdentifierStr;
 
 	GetNextToken(); // eat identifier. CurTok接收新的内容
 
+	// Variable.
 	if (CurTok != '(') // Simple variable ref. 紧接的不是'('，则不是函数调用，只能是变量
-		return new VariableExprAST(IdName);
+		return llvm::make_unique<VariableExprAST>(IdName);
 
-	// Call.
+	// CurTok == '(', Call.
 	GetNextToken(); // eat '('. CurTok是第一个形参 或 实参
-	std::vector<ExprAST *> Args;
-	if (CurTok != ')') // 排除Identifier(void)的情况
+	std::vector<std::unique_ptr<ExprAST>> Args;
+	if (CurTok != ')') // 有可能Identifier(void)的情况
 	{
 		while (1)
 		{
-			ExprAST *Arg = ParseExpression();	// 解析一个表达式
-			if (!Arg)
+			if (auto Arg = ParseExpression())	// 解析一个表达式（迭代调用）
+				Args.push_back(Arg);
+			else
 				return nullptr;
-			Args.push_back(Arg);
 
 			if (CurTok == ')')	// 判断是否右括号结束调用
 				break;
 
-			if (CurTok != ',')	// 若未结束，应接','再接后续参数
-				return Error("Expected ')' or ',' in argument list");
+			if (CurTok != ',')	// 若未结束，应接','再接后续参数，与解析prototypeExpr时不同
+				return LogError("Expected ')' or ',' in argument list");
 			GetNextToken();
 		}
 	}
 	GetNextToken();		// eat ')'. 刷新CurTok
-	return new CallExprAST(IdName, Args);
+	return llvm::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
 /// prototypeexpr ::= identifier '(' identifier* ')'
@@ -309,26 +310,29 @@ static PrototypeAST* ParsePrototype()
 /////////////////////////////////////////////////
 
 /// definitionexpr ::= 'def' prototypeexpr
+/// def foo(x y) expr
+/// 未处理expr后续
 static FunctionAST* ParseDefinition()
 {
 	GetNextToken();	// eat 'def'.
 
-	PrototypeAST* Proto = ParsePrototype();
+	PrototypeAST* Proto = ParsePrototype();		// eat prototype.
 	if (Proto == nullptr)
 		return nullptr;
 
-	if (ExprAST* FnBody = ParseExpression())	// 函数体也是一个表达式而已
+	if (ExprAST* FnBody = ParseExpression())	// eat expr 函数体也是一个表达式
 		return new FunctionAST(Proto, FnBody);
 	return nullptr;
 }
 
 /// external ::= 'extern' prototype
 /// extern函数也是一个Prototype
-/// TODO 是否需要处理';'
+/// extern foo(x y)
+/// 未处理prototype的后续
 static PrototypeAST* ParseExtern()
 {
 	GetNextToken();	// eat 'extern'.
-	return ParsePrototype();
+	return ParsePrototype();	// eat prototype
 }
 
 /// toplevelexpr ::= expression
@@ -336,7 +340,7 @@ static FunctionAST* ParseTopLevelExpr()
 {
 	if (ExprAST* FnBody = ParseExpression())
 	{
-		PrototypeAST* Proto = new PrototypeAST("", std::vector<std::string>());	// ->标识符和参数都为空的匿名函数
+		PrototypeAST* Proto = new PrototypeAST("", std::vector<std::string>());	// -> 一个表达式等价于标识符和参数都为空的匿名函数
 		return new FunctionAST(Proto, FnBody);
 	}
 	return nullptr;
