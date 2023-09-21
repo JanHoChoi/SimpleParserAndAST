@@ -110,44 +110,14 @@ static int GetTokPrecedence()
 	if (!isascii(CurTok))
 		return -1;
 
-	auto it = BinopPrecedence.find(CurTok);
-	if (it == BinopPrecedence.end())
+	int TokPrec = BinopPrecedence[CurTok];
+	if (TokPrec <= 0)	// 如果CurTok为空，则TokPrec得到一个默认值0
 		return -1;
-	return BinopPrecedence[CurTok];
-}
-
-#pragma endregion
-
-#pragma region 报错辅助
-
-// 区分了三种Error函数，返回值类型不同
-std::unique_ptr<ExprAST> LogError(const char *Str)
-{
-	fprintf(stderr, "LogError: %s\n", Str);
-	return nullptr;
-}
-
-std::unique_ptr<PrototypeAST> LogErrorP(const char *Str)
-{
-	LogError(Str);
-	return nullptr;
-}
-
-std::unique_ptr<FunctionAST> LogErrorF(const char *Str)
-{
-	LogError(Str);
-	return nullptr;
 }
 
 #pragma endregion
 
 #pragma region 解析当前Token
-
-static std::unique_ptr<ExprAST> ParseIdentifierExpr();
-static std::unique_ptr<ExprAST> ParseNumberExpr();
-static std::unique_ptr<ExprAST> ParseParenExpr();
-static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST *LHS);
-static std::unique_ptr<PrototypeAST> ParsePrototype();
 
 /// primary
 ///   ::= identifierexpr
@@ -159,7 +129,7 @@ static std::unique_ptr<ExprAST> ParsePrimary()
 	switch (CurTok)
 	{
 	default:
-		return Error("unknown token when expecting an expression");
+		return LogError("unknown token when expecting an expression");
 	case tok_identifier:
 		return ParseIdentifierExpr();
 	case tok_number:
@@ -177,13 +147,13 @@ static std::unique_ptr<ExprAST> ParseExpression()
 	if (!LHS)
 		return nullptr;
 
-	return ParseBinOpRHS(0, LHS);	// LHS指针指向当前已经解析出的左表达式
+	return ParseBinOpRHS(0, std::move(LHS));	// LHS指针指向当前已经解析出的左表达式
 }
 
 /// binoprhs
 ///   ::= ('+' primary)*
 /// 递归调用
-static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
+static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS)
 {
 	// If this is a binop, find its precedence.
 	while (1)
@@ -192,13 +162,13 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
 
 		// If this is a binop that binds at least as tightly as the current binop,
 		// consume it, otherwise we are done.
-		if (TokPrec < ExprPrec)		// 比当前运算符优先级更低/无效Token(-1），先不处理它
+		if (TokPrec < ExprPrec)		// 比当前运算符优先级更低/无效Token(-1），不处理它，直接返回LHS
 			return LHS;
 
 		int BinOp = CurTok;
 		GetNextToken();			// 吃掉当前BinOp，刷新CurTok
 
-		ExprAST* RHS = ParsePrimary();
+		auto RHS = ParsePrimary();	// 解析出运算符右边的PrimaryExpr
 		if (!RHS)
 			return nullptr;
 
@@ -212,18 +182,18 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, ExprAST* LHS)
 		{
 			// 目前需要完整的解析(RHS NextBinOp unparsed...)，发现可以递归调用
 			// 同时不需要GetNextToken()，因为NextBinOp还未处理，留在后续迭代中调用
-			RHS = ParseBinOpRHS(TokPrec + 1, RHS);
+			RHS = ParseBinOpRHS(TokPrec + 1, std::move(RHS));
 			if (!RHS)
 				return nullptr;
 		}
-		LHS = new BinaryExprAST(BinOp, LHS, RHS);	// 直接把当前的（LHS BinOp RHS）构造成一个AST节点作为新的LHS
+		LHS = std::make_unique<BinaryExprAST>(BinOp, std::move(LHS), std::move(RHS));	// 直接把当前的LHS BinOp RHS构造成一个AST节点作为新的LHS
 	}
 }
 
 /// numberexpr ::= number
 static std::unique_ptr<ExprAST> ParseNumberExpr()
 {
-	auto Result = llvm::make_unique<NumberExprAST>(NumVal);
+	auto Result = std::make_unique<NumberExprAST>(NumVal);
 	GetNextToken();	// eat number. 刷新CurTok
 	return std::move(Result);
 }
@@ -255,7 +225,7 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 
 	// Variable.
 	if (CurTok != '(') // Simple variable ref. 紧接的不是'('，则不是函数调用，只能是变量
-		return llvm::make_unique<VariableExprAST>(IdName);
+		return std::make_unique<VariableExprAST>(IdName);
 
 	// CurTok == '(', Call.
 	GetNextToken(); // eat '('. CurTok是第一个形参 或 实参
@@ -278,21 +248,21 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 		}
 	}
 	GetNextToken();		// eat ')'. 刷新CurTok
-	return llvm::make_unique<CallExprAST>(IdName, std::move(Args));
+	return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
 /// prototypeexpr ::= identifier '(' identifier* ')'
 /// 解析函数原型
-static PrototypeAST* ParsePrototype()
+static std::unique_ptr<PrototypeAST> ParsePrototype()
 {
 	if (CurTok != tok_identifier)
-		return ErrorP("Expected function name in prototype");
+		return LogErrorP("Expected function name in prototype");
 
 	std::string FnName = IdentifierStr;
 	GetNextToken();	// eat identifier.
 
 	if (CurTok != '(')
-		return ErrorP("Expected '(' in prototype");
+		return LogErrorP("Expected '(' in prototype");
 
 	std::vector<std::string> ArgNames;
 	while (GetNextToken() == tok_identifier)
@@ -300,11 +270,11 @@ static PrototypeAST* ParsePrototype()
 		ArgNames.push_back(IdentifierStr);
 	}
 	if (CurTok != ')')
-		return ErrorP("Expected ')' in prototype");
+		return LogErrorP("Expected ')' in prototype");
 
 	GetNextToken();	// eat ')'.
 
-	return new PrototypeAST(FnName, ArgNames);
+	return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
 }
 
 /////////////////////////////////////////////////
@@ -312,16 +282,16 @@ static PrototypeAST* ParsePrototype()
 /// definitionexpr ::= 'def' prototypeexpr
 /// def foo(x y) expr
 /// 未处理expr后续
-static FunctionAST* ParseDefinition()
+static std::unique_ptr<FunctionAST> ParseDefinition()
 {
 	GetNextToken();	// eat 'def'.
 
-	PrototypeAST* Proto = ParsePrototype();		// eat prototype.
+	auto Proto = ParsePrototype();		// eat prototype.
 	if (Proto == nullptr)
 		return nullptr;
 
-	if (ExprAST* FnBody = ParseExpression())	// eat expr 函数体也是一个表达式
-		return new FunctionAST(Proto, FnBody);
+	if (auto FnBody = ParseExpression())	// eat expr 函数体也是一个表达式
+		return std::make_unique<FunctionAST>(std::move(Proto), std::move(FnBody));
 	return nullptr;
 }
 
@@ -329,19 +299,19 @@ static FunctionAST* ParseDefinition()
 /// extern函数也是一个Prototype
 /// extern foo(x y)
 /// 未处理prototype的后续
-static PrototypeAST* ParseExtern()
+static std::unique_ptr<PrototypeAST> ParseExtern()
 {
 	GetNextToken();	// eat 'extern'.
 	return ParsePrototype();	// eat prototype
 }
 
 /// toplevelexpr ::= expression
-static FunctionAST* ParseTopLevelExpr()
+static std::unique_ptr<FunctionAST> ParseTopLevelExpr()
 {
-	if (ExprAST* FnBody = ParseExpression())
+	if (auto Expr = ParseExpression())	// 把TopLevelExpr视作一个无identifier无参数的函数来执行
 	{
-		PrototypeAST* Proto = new PrototypeAST("", std::vector<std::string>());	// -> 一个表达式等价于标识符和参数都为空的匿名函数
-		return new FunctionAST(Proto, FnBody);
+		auto Proto = std::make_unique<PrototypeAST>("", std::vector<std::string>());	// -> 一个表达式等价于标识符和参数都为空的匿名函数
+		return std::make_unique<FunctionAST>(std::move(Proto), std::move(Expr));
 	}
 	return nullptr;
 }

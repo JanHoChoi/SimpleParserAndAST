@@ -1,6 +1,6 @@
 //===----------------------------------------------------------------------===//
 // Abstract Syntax Tree (aka Parse Tree)
-//===----------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//#include "llvm/IR/LLVMContext.h" how to find files
 
 #ifndef AST_HPP
 #define AST_HPP
@@ -13,22 +13,16 @@
 #include <map>
 #include <memory>
 
-#include "llvm/DerivedTypes.h"
-#include "llvm/IRBuilder.h"
-#include "llvm/LLVMContext.h"
-#include "llvm/Module.h"
-#include "llvm/Analysis/Verifier.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
 
 using namespace llvm;
 
-static Module* TheModule;	// 顶层容器，存放所有函数和全局变量
-static IRBuilder<> Builder(getGlobalContext());
+static LLVMContext TheContext;
+static std::unique_ptr<Module> TheModule;	// 顶层容器，存放所有函数和全局变量
+static IRBuilder<> Builder(TheContext);
 static std::map<std::string, Value*> NamedValues;	// 当前作用域的变量与对应的Value
-
-Value* ErrorV(const char *Str) {
-	LogError(Str);
-	return nullptr;
-}
 
 /// ExprAST - Base class for all expression nodes.
 class ExprAST
@@ -47,10 +41,7 @@ class NumberExprAST : public ExprAST
 
 public:
 	NumberExprAST(double val) : Val(val) {}
-	virtual Value* Codegen()
-	{
-		return ConstantFP::get(getGlobalContext(), APFloat(Val));
-	}
+	Value* Codegen() override;
 };
 
 /// VariableExprAST - Expression class for referencing a variable, like "a".
@@ -60,11 +51,7 @@ class VariableExprAST : public ExprAST
 
 public:
 	VariableExprAST(const std::string &name) : Name(name) {}
-	virtual Value* Codegen()
-	{
-		Value* V = NamedValues[Name];
-		return V ? V : ErrorV("Unknown variable name");
-	}
+	Value* Codegen() override;
 };
 
 /// BinaryExprAST - Expression class for a binary operator. 二元运算符，比如加减乘除
@@ -75,71 +62,20 @@ class BinaryExprAST : public ExprAST
 
 public:
 	BinaryExprAST(char op, std::unique_ptr<ExprAST> lhs, std::unique_ptr<ExprAST> rhs)
-		: Op(op), LHS(lhs), RHS(rhs) {}
-	virtual Value* Codegen()
-	{
-		Value* L = LHS->Codegen();
-		Value* R = RHS->Codegen();
-		if (L == nullptr || R == nullptr)
-			return nullptr;
-
-		switch (Op)
-		{
-			case '+':
-				return Builder.CreateFAdd(L, R, "addtmp");
-			case '-':
-				return Builder.CreateFSub(L, R, "subtmp");
-			case '*':
-				return Builder.CreateFMul(L, R, "multmp");
-			case '/':
-				return Builder.CreateFDiv(L, R, "divmp");
-			case '<':
-			{
-				L = Builder.CreateFCmpULT(L, R, "cmptmp");
-				return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()), "booltmp");
-			}
-			case '>':
-			{
-				L = Builder.CreateFCmpULT(L, R, "cmptmp");
-				return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()), "booltmp");
-			}
-			default:
-				return ErrorV("Invalid binary operator");
-
-		}
-		Value* V = NamedValues[Name];
-		return V ? V : ErrorV("Unknown variable name");
-	}
+		: Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {}
+	Value* Codegen() override;
 };
 
 /// CallExprAST - Expression class for function calls.
 class CallExprAST : public ExprAST
 {
 	std::string Callee;
-	std::vector<ExprAST *> Args;
+	std::vector<std::unique_ptr<ExprAST>> Args;
 
 public:
-	CallExprAST(const std::string &callee, std::vector<ExprAST *> &args)
-		: Callee(callee), Args(args) {}
-	virtual Value* Codegen()
-	{
-		Function* CalleeF = TheModule->getFunction(Callee);
-		if (CalleeF == nullptr)
-			return ErrorV("Unknown function referenced");
-
-		if (CalleeF->arg_size() != Args.size())
-			return ErrorV("Incorrect # arguments passed");
-
-		std::vector<Value*> ArgsV;
-		for(unsigned i = 0, e = Args.size(); i != e; ++i)
-		{
-			ArgsV.push_back(Args[i]->Codegen());
-			if (ArgsV.back() == nullptr)
-				return nullptr;
-		}
-
-		return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
-	}
+	CallExprAST(const std::string &callee, std::vector<std::unique_ptr<ExprAST>> args)
+		: Callee(callee), Args(std::move(args)) {}
+	Value* Codegen() override;
 };
 
 /// PrototypeAST - This class represents the "prototype" for a function,
@@ -154,83 +90,174 @@ class PrototypeAST
 	std::vector<std::string> Args;
 
 public:
-	PrototypeAST(const std::string &name, const std::vector<std::string> &args)
-		: Name(name), Args(args) {}
-	Function* Codegen()
-	{
-		// 参数全是double类型
-		std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(getGlobalCOntext()));
-
-		// 返回值是单个double类型，参数是N个double类型
-		FunctionType* FT = FunctionType::get(Type::getDoubleTy(getGlobalContext()), Doubles, false);
-
-		Function* F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule);
-
-		// 检查函数是否已被定义过
-		if (F->getName() != Name)
-		{
-			F->eraseFromParent();
-			F = TheModule->getFunction(Name);	// 获取之前已定义过的函数
-		}
-
-		// 检查函数是否定义函数体
-		if (!F->empty())
-		{
-			LogError("Redefinition of function");
-			return nullptr;
-		}
-
-		// 判断之前的函数定义是否参数个数相同
-		if (F->arg_size() != Args.size())
-		{
-			LogError("Redefinition of function with different # args");
-			return nullptr;
-		}
-
-		unsigned Idx = 0;
-		for( Function::arg_iterator AI = F->arg_begin(); Idx != Args.size(); ++AI, ++Idx)
-		{
-			// 因为简单实现，所以不检查Args[Idx]是否有冲突
-			AI->setName(Args[Idx]);
-			NamedValues[Args[Idx]] = AI;
-		}
-	}
+	PrototypeAST(const std::string &name, const std::vector<std::string> args)
+		: Name(name), Args(std::move(args)) {}
+	Function* Codegen();
+	const std::string GetName() const { return Name;}
 };
 
 /// FunctionAST - This class represents a function definition itself.
 /// 函数本身，包括函数原型和函数体
 class FunctionAST
 {
-	PrototypeAST *Proto;
-	ExprAST *Body;
+	std::unique_ptr<PrototypeAST> Proto;
+	std::unique_ptr<ExprAST> Body;
 
 public:
-	FunctionAST(PrototypeAST *proto, ExprAST *body)
-		: Proto(proto), Body(body) {}
+	FunctionAST(std::unique_ptr<PrototypeAST> proto, std::unique_ptr<ExprAST> body)
+		: Proto(std::move(proto)), Body(std::move(body)) {}
 
-	Function* Codegen()
-	{
-		NamedValues.clear();	// ?? 清空之前的变量的影响
-
-		Function *TheFunction = Proto->Codegen();
-		if (TheFunction == 0)
-			return 0;
-
-		// Create a new basic block to start insertion into.
-		BasicBlock *BB = BasicBlock::Create(getGlobalContext(), "entry", TheFunction);
-		Builder.SetInsertPoint(BB);
-
-		if (Value *RetVal = Body->Codegen())
-		{
-			// Finish off the function.
-			Builder.CreateRet(RetVal);
-
-			// Validate the generated code, checking for consistency.
-			verifyFunction(*TheFunction);
-
-			return TheFunction;
-		}
-	}
+	Function* Codegen();
 };
+
+#pragma region 报错辅助
+
+// 区分了三种Error函数，返回值类型不同
+std::unique_ptr<ExprAST> LogError(const char *Str)
+{
+	fprintf(stderr, "LogError: %s\n", Str);
+	return nullptr;
+}
+
+std::unique_ptr<PrototypeAST> LogErrorP(const char *Str)
+{
+	LogError(Str);
+	return nullptr;
+}
+
+std::unique_ptr<FunctionAST> LogErrorF(const char *Str)
+{
+	LogError(Str);
+	return nullptr;
+}
+
+Value* LogErrorV(const char *Str) {
+	LogError(Str);
+	return nullptr;
+}
+
+#pragma endregion
+
+#pragma region Codegen()实现
+
+Value* NumberExprAST::Codegen()
+{
+	return ConstantFP::get(TheContext, APFloat(Val));
+}
+
+Value* VariableExprAST::Codegen()
+{
+	Value* V = NamedValues[Name];
+	return V ? V : LogErrorV("Unknown variable name");
+}
+
+Value* BinaryExprAST::Codegen()
+{
+	Value *L = LHS->Codegen();
+	Value *R = RHS->Codegen();
+	if (L == nullptr || R == nullptr)
+		return nullptr;
+
+	switch (Op)
+	{
+	case '+':
+		return Builder.CreateFAdd(L, R, "addtmp");
+	case '-':
+		return Builder.CreateFSub(L, R, "subtmp");
+	case '*':
+		return Builder.CreateFMul(L, R, "multmp");
+	case '/':
+		return Builder.CreateFDiv(L, R, "divmp");
+	case '<':
+	{
+		L = Builder.CreateFCmpULT(L, R, "cmptmp");
+		return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
+	}
+	case '>':
+	{
+		L = Builder.CreateFCmpUGT(L, R, "cmptmp");
+		return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
+	}
+	default:
+		return LogErrorV("Invalid binary operator");
+	}
+}
+
+Value* CallExprAST::Codegen()
+{
+	Function* CalleeF = TheModule->getFunction(Callee);
+	if (CalleeF == nullptr)
+		return LogErrorV("Unknown function referenced");
+
+	if (CalleeF->arg_size() != Args.size())
+		return LogErrorV("Incorrect # arguments passed");
+
+	std::vector<Value *> ArgsV;
+	for (unsigned i = 0, e = Args.size(); i != e; ++i)
+	{
+		ArgsV.push_back(Args[i]->Codegen());
+		if (ArgsV.back() == nullptr)
+			return nullptr;
+	}
+
+	return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+Function* PrototypeAST::Codegen()
+{
+	std::vector<Type *> Doubles(Args.size(), Type::getDoubleTy(TheContext));
+	FunctionType *FT = FunctionType::get(Type::getDoubleTy(TheContext), Doubles, false);
+
+	Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+
+	// Set names for all arguments.
+	unsigned Idx = 0;
+	for (auto &Arg : F->args())
+		Arg.setName(Args[Idx++]);
+
+	return F;
+}
+
+Function *FunctionAST::Codegen()
+{
+	Function *TheFunction = TheModule->getFunction(Proto->GetName());
+
+	if (!TheFunction)
+		TheFunction = Proto->Codegen();
+
+	if (!TheFunction)
+		return nullptr;
+
+	if (!TheFunction->empty())
+		return (Function *)LogErrorV("Function cannot be redefined.");
+
+	// Create a new basic block to start insertion into.
+	BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
+	Builder.SetInsertPoint(BB);
+
+	// Record the function arguments in the NamedValues map.
+	NamedValues.clear();
+	for (auto &Arg : TheFunction->args())
+	{
+		NamedValues[std::string(Arg.getName())] = &Arg;
+	}
+
+	if (Value *RetVal = Body->Codegen())
+	{
+		// Finish off the function.
+		Builder.CreateRet(RetVal);
+
+		// Validate the generated code, checking for consistency.
+		verifyFunction(*TheFunction);
+
+		return TheFunction;
+	}
+
+	// Error reading body, remove function.
+	TheFunction->eraseFromParent();
+	return nullptr;
+}
+
+#pragma endregion
 
 #endif
