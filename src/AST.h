@@ -16,13 +16,23 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Support/TargetSelect.h"
+#include "KaleidoscopeJIT.h"
 
 using namespace llvm;
 
-static LLVMContext TheContext;
+static std::unique_ptr<LLVMContext> TheContext;
 static std::unique_ptr<Module> TheModule;	// 顶层容器，存放所有函数和全局变量
-static IRBuilder<> Builder(TheContext);
+static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, Value*> NamedValues;	// 当前作用域的变量与对应的Value
+static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
+static ExitOnError ExitOnErr;
 
 /// ExprAST - Base class for all expression nodes.
 class ExprAST
@@ -142,7 +152,7 @@ Value* LogErrorV(const char *Str) {
 
 Value* NumberExprAST::Codegen()
 {
-	return ConstantFP::get(TheContext, APFloat(Val));
+	return ConstantFP::get(*TheContext, APFloat(Val));
 }
 
 Value* VariableExprAST::Codegen()
@@ -161,31 +171,48 @@ Value* BinaryExprAST::Codegen()
 	switch (Op)
 	{
 	case '+':
-		return Builder.CreateFAdd(L, R, "addtmp");
+		return Builder->CreateFAdd(L, R, "addtmp");
 	case '-':
-		return Builder.CreateFSub(L, R, "subtmp");
+		return Builder->CreateFSub(L, R, "subtmp");
 	case '*':
-		return Builder.CreateFMul(L, R, "multmp");
+		return Builder->CreateFMul(L, R, "multmp");
 	case '/':
-		return Builder.CreateFDiv(L, R, "divmp");
+		return Builder->CreateFDiv(L, R, "divmp");
 	case '<':
 	{
-		L = Builder.CreateFCmpULT(L, R, "cmptmp");
-		return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
+		L = Builder->CreateFCmpULT(L, R, "cmptmp");
+		return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
 	}
 	case '>':
 	{
-		L = Builder.CreateFCmpUGT(L, R, "cmptmp");
-		return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
+		L = Builder->CreateFCmpUGT(L, R, "cmptmp");
+		return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
 	}
 	default:
 		return LogErrorV("Invalid binary operator");
 	}
 }
 
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;	// 缓存函数定义
+
+Function* getFunction(const std::string& FuncName)
+{
+	if (auto F = TheModule->getFunction(FuncName))	// 当前模块已经有Func了，直接返回
+		return F;
+
+	auto FI = FunctionProtos.find(FuncName);
+	if (FI != FunctionProtos.end())
+	{
+		return FI->second->Codegen();	// 如果找不到，但是有缓存的Proto，重新创建一个Function
+	}
+
+	return nullptr;
+}
+
+
 Value* CallExprAST::Codegen()
 {
-	Function* CalleeF = TheModule->getFunction(Callee);
+	Function* CalleeF = getFunction(Callee);
 	if (CalleeF == nullptr)
 		return LogErrorV("Unknown function referenced");
 
@@ -200,13 +227,14 @@ Value* CallExprAST::Codegen()
 			return nullptr;
 	}
 
-	return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+	return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
 Function* PrototypeAST::Codegen()
 {
-	std::vector<Type *> Doubles(Args.size(), Type::getDoubleTy(TheContext));
-	FunctionType *FT = FunctionType::get(Type::getDoubleTy(TheContext), Doubles, false);
+	std::vector<Type *> Doubles(Args.size(), Type::getDoubleTy(*TheContext));	// 参数列表全是double类型
+
+	FunctionType *FT = FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);	// 返回值类型、形参列表
 
 	Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
 
@@ -220,7 +248,11 @@ Function* PrototypeAST::Codegen()
 
 Function *FunctionAST::Codegen()
 {
-	Function *TheFunction = TheModule->getFunction(Proto->GetName());
+	auto &P = *Proto;
+
+	FunctionProtos[Proto->GetName()] = std::move(Proto);	// 把proto的名称和proto实例缓存
+
+	Function *TheFunction = getFunction(P.GetName());
 
 	if (!TheFunction)
 		TheFunction = Proto->Codegen();
@@ -232,8 +264,8 @@ Function *FunctionAST::Codegen()
 		return (Function *)LogErrorV("Function cannot be redefined.");
 
 	// Create a new basic block to start insertion into.
-	BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
-	Builder.SetInsertPoint(BB);
+	BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+	Builder->SetInsertPoint(BB);
 
 	// Record the function arguments in the NamedValues map.
 	NamedValues.clear();
@@ -245,10 +277,13 @@ Function *FunctionAST::Codegen()
 	if (Value *RetVal = Body->Codegen())
 	{
 		// Finish off the function.
-		Builder.CreateRet(RetVal);
+		Builder->CreateRet(RetVal);
 
 		// Validate the generated code, checking for consistency.
 		verifyFunction(*TheFunction);
+
+		// Optimize the function.
+		TheFPM->run(*TheFunction);
 
 		return TheFunction;
 	}

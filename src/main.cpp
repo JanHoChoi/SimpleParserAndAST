@@ -1,11 +1,21 @@
 #include "AST.h"
 #include "Lexer.h"
+#include "KaleidoscopeJIT.h"
+
+void InitializeModuleAndPassManager();
 
 static void HandleDefinition()
 {
-	if (ParseDefinition())
+	if (auto FnAST = ParseDefinition())
 	{
-		fprintf(stderr, "Parsed a function definition.\n");
+		if (auto *FnIR = FnAST->Codegen())
+		{
+			fprintf(stderr, "Read function definition:\n");
+			FnIR->print(errs());
+			fprintf(stderr, "\n");
+			ExitOnErr(TheJIT->addModule(llvm::orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
+			InitializeModuleAndPassManager();
+		}
 	}
 	else
 	{
@@ -17,9 +27,14 @@ static void HandleDefinition()
 
 static void HandleExtern()
 {
-	if (ParseExtern())
+	if (auto ProtoAST = ParseExtern())
 	{
-		fprintf(stderr, "Parsed an extern\n");
+		if (auto *FnIR = ProtoAST->Codegen())
+		{
+			fprintf(stderr, "Read extern:\n");
+			FnIR->print(errs());
+			fprintf(stderr, "\n");
+		}
 	}
 	else
 	{
@@ -32,9 +47,28 @@ static void HandleExtern()
 static void HandleTopLevelExpression()
 {
 	// Evaluate a top-level expression into an anonymous function.
-	if (ParseTopLevelExpr())
+	if (auto FnAST = ParseTopLevelExpr())
 	{
-		fprintf(stderr, "Parsed a top-level expr\n");
+		if (auto *FnIR = FnAST->Codegen())
+		{
+			fprintf(stderr, "Read top-level expression:\n");
+			FnIR->print(errs());
+			fprintf(stderr, "\n");
+
+			auto RT = TheJIT->getMainJITDylib().createResourceTracker();
+
+			ExitOnErr(TheJIT->addModule(llvm::orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext)), RT));
+
+			InitializeModuleAndPassManager();
+
+			auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+			assert(ExprSymbol && "Failed to find function ");
+
+			double (*FP)() = ExprSymbol.getAddress().toPtr<double(*)()>();
+			fprintf(stderr, "Evaluated to %f\n", FP());
+
+			ExitOnErr(RT->remove());
+		}
 	}
 	else
 	{
@@ -44,10 +78,34 @@ static void HandleTopLevelExpression()
 	}
 }
 
+void InitializeModuleAndPassManager()
+{
+	TheContext = std::make_unique<LLVMContext>();
+
+	TheModule = std::make_unique<Module>("my cool jit", *TheContext);
+	TheModule->setDataLayout(TheJIT->getDataLayout());
+
+	Builder = std::make_unique<IRBuilder<>>(*TheContext);
+
+	TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
+	TheFPM->add(llvm::createInstructionCombiningPass());
+	TheFPM->add(llvm::createGVNPass());
+	TheFPM->add(llvm::createCFGSimplificationPass());
+	TheFPM->doInitialization();
+}
+
 int main()
 {
+	llvm::InitializeNativeTarget();
+	llvm::InitializeNativeTargetAsmPrinter();;
+	llvm::InitializeNativeTargetAsmParser();
+
 	fprintf(stderr, "ready> ");
 	GetNextToken();
+
+	TheJIT = ExitOnErr(llvm::orc::KaleidoscopeJIT::Create());
+
+	InitializeModuleAndPassManager();
 
 	while (1)
 	{

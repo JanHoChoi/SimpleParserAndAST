@@ -89,7 +89,8 @@ static int GetToken() {
 
 static int GetNextToken()
 {
-	return CurTok = GetToken();
+	CurTok = GetToken();
+	return CurTok;
 }
 
 #pragma region 运算符优先级处理
@@ -113,11 +114,17 @@ static int GetTokPrecedence()
 	int TokPrec = BinopPrecedence[CurTok];
 	if (TokPrec <= 0)	// 如果CurTok为空，则TokPrec得到一个默认值0
 		return -1;
+	return TokPrec;
 }
 
 #pragma endregion
 
 #pragma region 解析当前Token
+
+static std::unique_ptr<ExprAST> ParseIdentifierExpr();
+static std::unique_ptr<ExprAST> ParseNumberExpr();
+static std::unique_ptr<ExprAST> ParseParenExpr();
+static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
 
 /// primary
 ///   ::= identifierexpr
@@ -163,7 +170,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<Expr
 		// If this is a binop that binds at least as tightly as the current binop,
 		// consume it, otherwise we are done.
 		if (TokPrec < ExprPrec)		// 比当前运算符优先级更低/无效Token(-1），不处理它，直接返回LHS
-			return LHS;
+			return std::move(LHS);
 
 		int BinOp = CurTok;
 		GetNextToken();			// 吃掉当前BinOp，刷新CurTok
@@ -235,7 +242,7 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 		while (1)
 		{
 			if (auto Arg = ParseExpression())	// 解析一个表达式（迭代调用）
-				Args.push_back(Arg);
+				Args.push_back(std::move(Arg));
 			else
 				return nullptr;
 
@@ -310,7 +317,7 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr()
 {
 	if (auto Expr = ParseExpression())	// 把TopLevelExpr视作一个无identifier无参数的函数来执行
 	{
-		auto Proto = std::make_unique<PrototypeAST>("", std::vector<std::string>());	// -> 一个表达式等价于标识符和参数都为空的匿名函数
+		auto Proto = std::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());	// -> 一个表达式等价于标识符和参数都为空的匿名函数
 		return std::make_unique<FunctionAST>(std::move(Proto), std::move(Expr));
 	}
 	return nullptr;
