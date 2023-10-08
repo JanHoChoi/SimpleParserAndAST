@@ -18,6 +18,9 @@ enum Token {
 	tok_extern = -3,
 	tok_identifier = -4,
 	tok_number = -5,
+	tok_if = -6,
+	tok_then = -7,
+	tok_else = -8,
 };
 
 static std::string IdentifierStr;
@@ -47,6 +50,12 @@ static int GetToken() {
 			return Token::tok_def;
 		if (IdentifierStr == "extern")
 			return Token::tok_extern;
+		if (IdentifierStr == "if")
+			return Token::tok_if;
+		if (IdentifierStr == "then")
+			return Token::tok_then;
+		if (IdentifierStr == "else")
+			return Token::tok_else;
 		return tok_identifier;
 	}
 
@@ -125,6 +134,7 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr();
 static std::unique_ptr<ExprAST> ParseNumberExpr();
 static std::unique_ptr<ExprAST> ParseParenExpr();
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
+static std::unique_ptr<ExprAST> ParseIfExpr();
 
 /// primary
 ///   ::= identifierexpr
@@ -143,6 +153,8 @@ static std::unique_ptr<ExprAST> ParsePrimary()
 		return ParseNumberExpr();
 	case '(':
 		return ParseParenExpr();
+	case tok_if:
+		return ParseIfExpr();
 	}
 }
 
@@ -256,6 +268,33 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 	}
 	GetNextToken();		// eat ')'. 刷新CurTok
 	return std::make_unique<CallExprAST>(IdName, std::move(Args));
+}
+
+static std::unique_ptr<ExprAST> ParseIfExpr()
+{
+	GetNextToken();	// eat 'if'.
+
+	auto Cond = ParseExpression();
+	if (!Cond)
+		return nullptr;
+
+	if (CurTok != tok_then)
+		return LogError("expected then");
+	GetNextToken();	// eat 'then'.
+
+	auto Then = ParseExpression();
+	if (!Then)
+		return nullptr;
+
+	if (CurTok != tok_else)
+		return LogError("expected else");
+	GetNextToken();	// eat 'else'
+
+	auto Else = ParseExpression();
+	if (!Else)
+		return nullptr;
+
+	return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
 }
 
 /// prototypeexpr ::= identifier '(' identifier* ')'

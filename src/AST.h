@@ -88,6 +88,19 @@ public:
 	Value* Codegen() override;
 };
 
+/// IfExprAST - Expression class for if/then/else
+class IfExprAST : public ExprAST
+{
+	std::unique_ptr<ExprAST> Cond;
+	std::unique_ptr<ExprAST> Then;
+	std::unique_ptr<ExprAST> Else;
+
+public:
+	IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then, std::unique_ptr<ExprAST> Else)
+		: Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+	Value* Codegen() override;
+};
+
 /// PrototypeAST - This class represents the "prototype" for a function,
 /// which captures its name, and its argument names (thus implicitly the number
 /// of arguments the function takes).
@@ -193,11 +206,62 @@ Value* BinaryExprAST::Codegen()
 	}
 }
 
+Value* IfExprAST::Codegen()
+{
+	Value *CondV = Cond->Codegen();
+	if (!CondV)
+		return nullptr;
+
+	CondV = Builder->CreateFCmpONE(CondV, ConstantFP::get(*TheContext, APFloat(0.0)), "ifcond");
+
+	Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+	// Create blocks for the then and else cases.  Insert the 'then' block at the
+	// end of the function.
+	BasicBlock *ThenBB = BasicBlock::Create(*TheContext, "then", TheFunction);
+	BasicBlock *ElseBB = BasicBlock::Create(*TheContext, "else");
+	BasicBlock *MergeBB = BasicBlock::Create(*TheContext, "ifcont");
+
+	Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+
+	// Emit then value.
+	Builder->SetInsertPoint(ThenBB);
+
+	Value *ThenV = Then->Codegen();
+	if (!ThenV)
+		return nullptr;
+
+	Builder->CreateBr(MergeBB);
+	// Codegen of 'Then' can change the current block, update ThenBB for the PHI.
+	ThenBB = Builder->GetInsertBlock();
+
+	// Emit else block.
+	TheFunction->insert(TheFunction->end(), ElseBB);
+	Builder->SetInsertPoint(ElseBB);
+
+	Value *ElseV = Else->Codegen();
+	if (!ElseV)
+		return nullptr;
+
+	Builder->CreateBr(MergeBB);
+	// Codegen of 'Else' can change the current block, update ElseBB for the PHI.
+	ElseBB = Builder->GetInsertBlock();
+
+	// Emit merge block.
+	TheFunction->insert(TheFunction->end(), MergeBB);
+	Builder->SetInsertPoint(MergeBB);
+	PHINode *PN = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");
+
+	PN->addIncoming(ThenV, ThenBB);
+	PN->addIncoming(ElseV, ElseBB);
+	return PN;
+}
+
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;	// 缓存函数定义
 
 Function* getFunction(const std::string& FuncName)
 {
-	if (auto F = TheModule->getFunction(FuncName))	// 当前模块已经有Func了，直接返回
+	if (auto *F = TheModule->getFunction(FuncName))	// 当前模块已经有Func了，直接返回
 		return F;
 
 	auto FI = FunctionProtos.find(FuncName);
@@ -287,7 +351,6 @@ Function *FunctionAST::Codegen()
 
 		return TheFunction;
 	}
-
 	// Error reading body, remove function.
 	TheFunction->eraseFromParent();
 	return nullptr;

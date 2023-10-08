@@ -34,6 +34,7 @@ static void HandleExtern()
 			fprintf(stderr, "Read extern:\n");
 			FnIR->print(errs());
 			fprintf(stderr, "\n");
+			FunctionProtos[ProtoAST->GetName()] = std::move(ProtoAST);
 		}
 	}
 	else
@@ -60,9 +61,8 @@ static void HandleTopLevelExpression()
 			ExitOnErr(TheJIT->addModule(llvm::orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext)), RT));
 
 			InitializeModuleAndPassManager();
-
 			auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
-			assert(ExprSymbol && "Failed to find function ");
+			assert(ExprSymbol && "Function not found");
 
 			double (*FP)() = ExprSymbol.getAddress().toPtr<double(*)()>();
 			fprintf(stderr, "Evaluated to %f\n", FP());
@@ -92,6 +92,26 @@ void InitializeModuleAndPassManager()
 	TheFPM->add(llvm::createGVNPass());
 	TheFPM->add(llvm::createCFGSimplificationPass());
 	TheFPM->doInitialization();
+}
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X)
+{
+	fputc((char)X, stderr);
+	return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X)
+{
+	fprintf(stderr, "%f\n", X);
+	return 0;
 }
 
 int main()
