@@ -21,6 +21,8 @@ enum Token {
 	tok_if = -6,
 	tok_then = -7,
 	tok_else = -8,
+	tok_for = -9,
+	tok_in = -10,
 };
 
 static std::string IdentifierStr;
@@ -56,6 +58,10 @@ static int GetToken() {
 			return Token::tok_then;
 		if (IdentifierStr == "else")
 			return Token::tok_else;
+		if (IdentifierStr == "for")
+			return Token::tok_for;
+		if (IdentifierStr == "in")
+			return Token::tok_in;
 		return tok_identifier;
 	}
 
@@ -135,6 +141,7 @@ static std::unique_ptr<ExprAST> ParseNumberExpr();
 static std::unique_ptr<ExprAST> ParseParenExpr();
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
 static std::unique_ptr<ExprAST> ParseIfExpr();
+static std::unique_ptr<ExprAST> ParseForExpr();
 
 /// primary
 ///   ::= identifierexpr
@@ -155,6 +162,8 @@ static std::unique_ptr<ExprAST> ParsePrimary()
 		return ParseParenExpr();
 	case tok_if:
 		return ParseIfExpr();
+	case tok_for:
+		return ParseForExpr();
 	}
 }
 
@@ -270,6 +279,8 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr()
 	return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// ifexpr
+///   ::= 'if' expression 'then' expression 'else' expression
 static std::unique_ptr<ExprAST> ParseIfExpr()
 {
 	GetNextToken();	// eat 'if'.
@@ -295,6 +306,54 @@ static std::unique_ptr<ExprAST> ParseIfExpr()
 		return nullptr;
 
 	return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
+}
+
+/// forexpr
+///   ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+static std::unique_ptr<ExprAST> ParseForExpr()
+{
+	GetNextToken();	// eat 'for'.
+
+	if (CurTok != tok_identifier)
+		return LogError("expected identifier after for");
+
+	std::string IdName = IdentifierStr;
+	GetNextToken();	// eat identifier
+
+	if (CurTok != '=')
+		return LogError("expected '=' after for");
+	GetNextToken();	// eat '='.
+
+	auto Start = ParseExpression();
+	if (!Start)
+		return nullptr;
+	if (CurTok != ',')
+		return LogError("expected ',' after for start value");
+	GetNextToken();
+
+	auto End = ParseExpression();
+	if (!End)
+		return nullptr;
+
+	// The step value is optional.
+	std::unique_ptr<ExprAST> Step;
+	if (CurTok == ',')
+	{
+		GetNextToken();
+		Step = ParseExpression();
+		if (!Step)
+			return nullptr;
+	}
+
+	if (CurTok != tok_in)
+		return LogError("expected 'in' after for");
+	GetNextToken(); // eat 'in'.
+
+	auto Body = ParseExpression();
+	if (!Body)
+		return nullptr;
+
+	return std::make_unique<ForExprAST>(IdName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
 }
 
 /// prototypeexpr ::= identifier '(' identifier* ')'

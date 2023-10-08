@@ -101,6 +101,21 @@ public:
 	Value* Codegen() override;
 };
 
+/// ForExpr - Expression class for for ... in
+class ForExprAST : public ExprAST
+{
+	std::string VarName;
+	std::unique_ptr<ExprAST> Start;
+	std::unique_ptr<ExprAST> End;
+	std::unique_ptr<ExprAST> Step;
+	std::unique_ptr<ExprAST> Body;
+
+public:
+	ForExprAST(const std::string &VarName, std::unique_ptr<ExprAST> Start, std::unique_ptr<ExprAST> End, std::unique_ptr<ExprAST> Step, std::unique_ptr<ExprAST> Body)
+		: VarName(VarName), Start(std::move(Start)), End(std::move(End)), Step(std::move(Step)), Body(std::move(Body)) {}
+	Value* Codegen() override;
+};
+
 /// PrototypeAST - This class represents the "prototype" for a function,
 /// which captures its name, and its argument names (thus implicitly the number
 /// of arguments the function takes).
@@ -227,7 +242,7 @@ Value* IfExprAST::Codegen()
 	// Emit then value.
 	Builder->SetInsertPoint(ThenBB);
 
-	Value *ThenV = Then->Codegen();
+	Value *ThenV = Then->Codegen();		// Then的具体代码在Codegen过程中，插入到了ThenBB里面
 	if (!ThenV)
 		return nullptr;
 
@@ -239,7 +254,7 @@ Value* IfExprAST::Codegen()
 	TheFunction->insert(TheFunction->end(), ElseBB);
 	Builder->SetInsertPoint(ElseBB);
 
-	Value *ElseV = Else->Codegen();
+	Value *ElseV = Else->Codegen();		// Else的具体代码在Codegen过程中，插入到了ElseBB里面
 	if (!ElseV)
 		return nullptr;
 
@@ -250,11 +265,92 @@ Value* IfExprAST::Codegen()
 	// Emit merge block.
 	TheFunction->insert(TheFunction->end(), MergeBB);
 	Builder->SetInsertPoint(MergeBB);
-	PHINode *PN = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");
+	PHINode *PN = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");	// 在MergeBB中，创建一个PHINNode，这个Node会作为函数的返回值
 
 	PN->addIncoming(ThenV, ThenBB);
 	PN->addIncoming(ElseV, ElseBB);
 	return PN;
+}
+
+Value* ForExprAST::Codegen()
+{
+	// Emit the start code first, without 'variable' in scope.
+	Value *StartVal = Start->Codegen();
+	if (!StartVal)
+		return nullptr;
+
+	// Make the new basic block for the loop header, inserting after current
+	// block.
+	Function *TheFunction = Builder->GetInsertBlock()->getParent();
+	BasicBlock *PreheaderBB = Builder->GetInsertBlock();	// 初始化的
+	BasicBlock *LoopBB = BasicBlock::Create(*TheContext, "loop", TheFunction);
+
+	// Insert an explicit fall through from the current block to the LoopBB.
+	Builder->CreateBr(LoopBB);
+
+	// Start insertion in LoopBB.
+	Builder->SetInsertPoint(LoopBB);
+
+	// Start the PHI node with an entry for Start.
+	PHINode *Variable = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName);
+	Variable->addIncoming(StartVal, PreheaderBB);
+
+	// Within the loop, the variable is defined equal to the PHI node.  If it
+	// shadows an existing variable, we have to restore it, so save it now.
+	Value *OldVal = NamedValues[VarName];	// 先把重名的旧的Value提取出来（比如for之前已经定义过i，使用for中的局部变量暂时覆盖它）
+	NamedValues[VarName] = Variable;		// 让VarName可以被Body使用
+
+	// Emit the body of the loop.  This, like any other expr, can change the
+	// current BB.  Note that we ignore the value computed by the body, but don't
+	// allow an error.
+	if (!Body->Codegen())		// Body的相关IR代码已经插到了LoopBB里面
+		return nullptr;
+
+	// Emit the step value.
+	Value *StepVal = nullptr;
+	if (Step)
+	{
+		StepVal = Step->Codegen();
+		if (!StepVal)
+			return nullptr;
+	}
+	else
+	{
+		// If not specified, use 1.0.
+		StepVal = ConstantFP::get(*TheContext, APFloat(1.0));
+	}
+
+	Value *NextVar = Builder->CreateFAdd(Variable, StepVal, "nextvar");
+
+	// Compute the end condition.
+	Value *EndCond = End->Codegen();
+	if (!EndCond)
+		return nullptr;
+
+	// Convert condition to a bool by comparing non-equal to 0.0.
+	EndCond = Builder->CreateFCmpONE(EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
+
+	// Create the "after loop" block and insert it.
+	BasicBlock *LoopEndBB = Builder->GetInsertBlock();
+	BasicBlock *AfterBB = BasicBlock::Create(*TheContext, "afterloop", TheFunction);
+
+	// Insert the conditional branch into the end of LoopEndBB.
+	Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+
+	// Any new code will be inserted in AfterBB.
+	Builder->SetInsertPoint(AfterBB);
+
+	// Add a new entry to the PHI node for the backedge.
+	Variable->addIncoming(NextVar, LoopEndBB);
+
+	// Restore the unshadowed variable.
+	if (OldVal)
+		NamedValues[VarName] = OldVal;		// 把局部变量覆盖的Val还回去
+	else
+		NamedValues.erase(VarName);
+
+	// for expr always returns 0.0.
+	return Constant::getNullValue(Type::getDoubleTy(*TheContext));
 }
 
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;	// 缓存函数定义
