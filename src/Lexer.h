@@ -23,6 +23,8 @@ enum Token {
 	tok_else = -8,
 	tok_for = -9,
 	tok_in = -10,
+	tok_binary = -11,	// 二元运算符
+	tok_unary = -12,	// 一元运算符
 };
 
 static std::string IdentifierStr;
@@ -62,6 +64,10 @@ static int GetToken() {
 			return Token::tok_for;
 		if (IdentifierStr == "in")
 			return Token::tok_in;
+		if (IdentifierStr == "binary")
+			return Token::tok_binary;
+		if (IdentifierStr == "unary")
+			return Token::tok_unary;
 		return tok_identifier;
 	}
 
@@ -110,16 +116,6 @@ static int GetNextToken()
 
 #pragma region 运算符优先级处理
 
-// TODO 是否有可能有运算符二义性？
-static std::map<char, int> BinopPrecedence = {
-	{'<', 10},
-	{'>', 10},
-	{'+', 20},
-	{'-', 20},
-	{'*', 40},
-	{'/', 40},
-};
-
 // 获取当前Token的优先级，若不是合法运算符则返回-1
 static int GetTokPrecedence()
 {
@@ -167,11 +163,25 @@ static std::unique_ptr<ExprAST> ParsePrimary()
 	}
 }
 
+static std::unique_ptr<ExprAST> ParseUnary()
+{
+	// If the current token is not an operator, it must be a primary expr.
+	if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+		return ParsePrimary();
+
+	// If this is a unary operator, read it.
+	int Opc = CurTok;
+	GetNextToken();
+	if (auto Operand = ParseUnary())
+		return std::make_unique<UnaryExprAST>(Opc, std::move(Operand));
+	return nullptr;
+}
+
 /// expression
 ///   ::= primary binoprhs
 static std::unique_ptr<ExprAST> ParseExpression()
 {
-	auto LHS = ParsePrimary();	// 确定LHS是一个完整的主表达式
+	auto LHS = ParseUnary();	// 确定LHS是一个完整的主表达式
 	if (!LHS)
 		return nullptr;
 
@@ -196,7 +206,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<Expr
 		int BinOp = CurTok;
 		GetNextToken();			// 吃掉当前BinOp，刷新CurTok
 
-		auto RHS = ParsePrimary();	// 解析出运算符右边的PrimaryExpr
+		auto RHS = ParseUnary();	// 解析出运算符右边的Expr
 		if (!RHS)
 			return nullptr;
 
@@ -360,11 +370,46 @@ static std::unique_ptr<ExprAST> ParseForExpr()
 /// 解析函数原型
 static std::unique_ptr<PrototypeAST> ParsePrototype()
 {
-	if (CurTok != tok_identifier)
-		return LogErrorP("Expected function name in prototype");
+	std::string FnName;
 
-	std::string FnName = IdentifierStr;
-	GetNextToken();	// eat identifier.
+	unsigned Kind = 0;	// 0 = identifier, 1 = unary, 2 = binary
+	unsigned BinaryPrecedence = 30;
+
+	switch (CurTok)
+	{
+	default:
+		return LogErrorP("Expected function name in prototype");
+	case tok_identifier:
+		FnName = IdentifierStr;
+		Kind = 0;
+		GetNextToken();	// eat identifier.
+		break;
+	case tok_binary:
+		GetNextToken();	// eat 'binary'
+		if (!isascii(CurTok))
+			return LogErrorP("Expected binary operator");
+		FnName = "binary";
+		FnName += (char)CurTok;
+		Kind = 2;
+		GetNextToken();	// eat op
+		if (CurTok == tok_number)
+		{
+			if (NumVal < 1 || NumVal >100)
+				return LogErrorP("Invalid precedence: must be 1..100");
+			BinaryPrecedence = (unsigned)NumVal;
+			GetNextToken();	// eat precedence
+		}
+		break;
+	case tok_unary:
+		GetNextToken();	// eat 'binary'
+		if (!isascii(CurTok))
+			return LogErrorP("Expected binary operator");
+		FnName = "unary";
+		FnName += (char)CurTok;
+		Kind = 1;
+		GetNextToken();	// eat op
+		break;
+	}
 
 	if (CurTok != '(')
 		return LogErrorP("Expected '(' in prototype");
@@ -379,7 +424,12 @@ static std::unique_ptr<PrototypeAST> ParsePrototype()
 
 	GetNextToken();	// eat ')'.
 
-	return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+	if (Kind && ArgNames.size() != Kind)
+	{
+		return LogErrorP("Invalid number of operands for operator");
+	}
+
+	return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0, BinaryPrecedence);
 }
 
 /////////////////////////////////////////////////

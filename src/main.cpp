@@ -50,12 +50,8 @@ static void HandleTopLevelExpression()
 	// Evaluate a top-level expression into an anonymous function.
 	if (auto FnAST = ParseTopLevelExpr())
 	{
-		if (auto *FnIR = FnAST->Codegen())
+		if (FnAST->Codegen())
 		{
-			fprintf(stderr, "Read top-level expression:\n");
-			FnIR->print(errs());
-			fprintf(stderr, "\n");
-
 			auto RT = TheJIT->getMainJITDylib().createResourceTracker();
 
 			ExitOnErr(TheJIT->addModule(llvm::orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext)), RT));

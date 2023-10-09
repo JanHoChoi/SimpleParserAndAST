@@ -34,6 +34,26 @@ static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
 static ExitOnError ExitOnErr;
 
+Function* getFunction(const std::string& FuncName);
+
+// TODO 是否有可能有运算符二义性？
+static std::map<char, int> BinopPrecedence = {
+	{'<', 10},
+	{'+', 20},
+	{'-', 20},
+	{'*', 40},
+	{'/', 40},
+};
+
+/// CreateEntryBlockAlloca - Create an alloca instruction in the entry block of
+/// the function.  This is used for mutable variables etc.
+/// 为函数创建局部变量
+static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction, const std::string &VarName)
+{
+	IRBuilder<> TmpB(&TheFunction->getEntryBlock(), TheFunction->getEntryBlock().begin());
+	return TmpB.CreateAlloca(Type::getDoubleTy(*TheContext), 0, VarName.c_str());
+}
+
 /// ExprAST - Base class for all expression nodes.
 class ExprAST
 {
@@ -74,6 +94,19 @@ public:
 	BinaryExprAST(char op, std::unique_ptr<ExprAST> lhs, std::unique_ptr<ExprAST> rhs)
 		: Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {}
 	Value* Codegen() override;
+};
+
+/// UnaryExprAST - Expression class for a unary operator.
+class UnaryExprAST : public ExprAST
+{
+	char Opcode;
+	std::unique_ptr<ExprAST> Operand;
+
+public:
+	UnaryExprAST(char Opcode, std::unique_ptr<ExprAST> Operand)
+		: Opcode(Opcode), Operand(std::move(Operand)) {}
+
+	Value *Codegen() override;
 };
 
 /// CallExprAST - Expression class for function calls.
@@ -126,12 +159,27 @@ class PrototypeAST
 {
 	std::string Name;
 	std::vector<std::string> Args;
+	bool IsOperator;
+	unsigned Precedence;	// 当且仅当是binary operator时才有效
 
 public:
-	PrototypeAST(const std::string &name, const std::vector<std::string> args)
-		: Name(name), Args(std::move(args)) {}
+	PrototypeAST(const std::string &Name, const std::vector<std::string> Args, bool IsOperator = false, unsigned Prec = 0)
+		: Name(Name), Args(std::move(Args)), IsOperator(IsOperator), Precedence(Prec) {}
 	Function* Codegen();
 	const std::string GetName() const { return Name;}
+
+	bool IsUnaryOp() const { return IsOperator && Args.size() == 1; }
+	bool IsBinaryOp() const { return IsOperator && Args.size() == 2; }
+
+	char GetOperatorName() const {
+		assert(IsUnaryOp() || IsBinaryOp());
+		return Name[Name.size() - 1];
+	}
+
+	unsigned GetBinaryPrecedence() const {
+		assert(IsBinaryOp());
+		return Precedence;
+	}
 };
 
 /// FunctionAST - This class represents a function definition itself.
@@ -211,14 +259,30 @@ Value* BinaryExprAST::Codegen()
 		L = Builder->CreateFCmpULT(L, R, "cmptmp");
 		return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
 	}
-	case '>':
-	{
-		L = Builder->CreateFCmpUGT(L, R, "cmptmp");
-		return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
-	}
 	default:
-		return LogErrorV("Invalid binary operator");
+		break;
 	}
+
+	// If it wasn't a builtin binary operator, it must be a user defined one. Emit
+	// a call to it.
+	Function *F = getFunction(std::string("binary") + Op);
+	assert(F && "binary operator not found!");
+
+	Value *Ops[2] = {L, R};
+	return Builder->CreateCall(F, Ops, "binop");
+}
+
+Value* UnaryExprAST::Codegen()
+{
+	Value *OperandV = Operand->Codegen();
+	if (OperandV == nullptr)
+		return nullptr;
+
+	Function *F = getFunction(std::string("unary") + Opcode);
+	if (!F)
+		return LogErrorV("Unknown unary operator");
+
+	return Builder->CreateCall(F, OperandV, "unop");
 }
 
 Value* IfExprAST::Codegen()
@@ -369,7 +433,6 @@ Function* getFunction(const std::string& FuncName)
 	return nullptr;
 }
 
-
 Value* CallExprAST::Codegen()
 {
 	Function* CalleeF = getFunction(Callee);
@@ -422,6 +485,9 @@ Function *FunctionAST::Codegen()
 
 	if (!TheFunction->empty())
 		return (Function *)LogErrorV("Function cannot be redefined.");
+
+	if (P.IsBinaryOp())
+		BinopPrecedence[P.GetOperatorName()] = P.GetBinaryPrecedence();
 
 	// Create a new basic block to start insertion into.
 	BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
