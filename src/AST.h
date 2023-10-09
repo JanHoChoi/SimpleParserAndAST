@@ -27,12 +27,16 @@
 
 using namespace llvm;
 
+#define USE_JIT 0
+
 static std::unique_ptr<LLVMContext> TheContext;
 static std::unique_ptr<Module> TheModule;	// 顶层容器，存放所有函数和全局变量
 static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, AllocaInst*> NamedValues;	// 当前作用域的变量与对应的Value
+#if USE_JIT
 static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
+#endif
 static ExitOnError ExitOnErr;
 
 Function* getFunction(const std::string& FuncName);
@@ -573,13 +577,7 @@ Function *FunctionAST::Codegen()
 	Function *TheFunction = getFunction(P.GetName());
 
 	if (!TheFunction)
-		TheFunction = Proto->Codegen();
-
-	if (!TheFunction)
 		return nullptr;
-
-	if (!TheFunction->empty())
-		return (Function *)LogErrorV("Function cannot be redefined.");
 
 	if (P.IsBinaryOp())
 		BinopPrecedence[P.GetOperatorName()] = P.GetBinaryPrecedence();
@@ -602,6 +600,7 @@ Function *FunctionAST::Codegen()
 		NamedValues[std::string(Arg.getName())] = Alloca;
 	}
 
+
 	if (Value *RetVal = Body->Codegen())
 	{
 		// Finish off the function.
@@ -609,14 +608,18 @@ Function *FunctionAST::Codegen()
 
 		// Validate the generated code, checking for consistency.
 		verifyFunction(*TheFunction);
-
+#if USE_JIT
 		// Optimize the function.
 		TheFPM->run(*TheFunction);
+#endif
 
 		return TheFunction;
 	}
 	// Error reading body, remove function.
 	TheFunction->eraseFromParent();
+
+	if (P.IsBinaryOp())
+		BinopPrecedence.erase(P.GetOperatorName());
 	return nullptr;
 }
 

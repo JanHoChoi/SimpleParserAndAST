@@ -2,6 +2,14 @@
 #include "Lexer.h"
 #include "KaleidoscopeJIT.h"
 
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Host.h"
+
 void InitializeModuleAndPassManager();
 
 static void HandleDefinition()
@@ -13,8 +21,10 @@ static void HandleDefinition()
 			fprintf(stderr, "Read function definition:\n");
 			FnIR->print(errs());
 			fprintf(stderr, "\n");
+#if USE_JIT
 			ExitOnErr(TheJIT->addModule(llvm::orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
 			InitializeModuleAndPassManager();
+#endif
 		}
 	}
 	else
@@ -50,6 +60,7 @@ static void HandleTopLevelExpression()
 	// Evaluate a top-level expression into an anonymous function.
 	if (auto FnAST = ParseTopLevelExpr())
 	{
+#if USE_JIT
 		if (FnAST->Codegen())
 		{
 			auto RT = TheJIT->getMainJITDylib().createResourceTracker();
@@ -65,6 +76,9 @@ static void HandleTopLevelExpression()
 
 			ExitOnErr(RT->remove());
 		}
+#else
+		FnAST->Codegen();
+#endif
 	}
 	else
 	{
@@ -79,10 +93,12 @@ void InitializeModuleAndPassManager()
 	TheContext = std::make_unique<LLVMContext>();
 
 	TheModule = std::make_unique<Module>("my cool jit", *TheContext);
+#if USE_JIT
 	TheModule->setDataLayout(TheJIT->getDataLayout());
-
+#endif
 	Builder = std::make_unique<IRBuilder<>>(*TheContext);
 
+#if USE_JIT
 	TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
 	TheFPM->add(llvm::createInstructionCombiningPass());
 	TheFPM->add(llvm::createGVNPass());
@@ -94,6 +110,7 @@ void InitializeModuleAndPassManager()
 	// Reassociate expressions.
 	TheFPM->add(createReassociatePass());
 	TheFPM->doInitialization();
+#endif
 }
 
 #ifdef _WIN32
@@ -118,14 +135,18 @@ extern "C" DLLEXPORT double printd(double X)
 
 int main()
 {
+#if USE_JIT
 	llvm::InitializeNativeTarget();
 	llvm::InitializeNativeTargetAsmPrinter();;
 	llvm::InitializeNativeTargetAsmParser();
+#endif
 
 	fprintf(stderr, "ready> ");
 	GetNextToken();
 
+#if USE_JIT
 	TheJIT = ExitOnErr(llvm::orc::KaleidoscopeJIT::Create());
+#endif
 
 	InitializeModuleAndPassManager();
 
@@ -151,11 +172,74 @@ int main()
 				HandleExtern();
 				break;
 			}
+			case tok_exit:
+			{
+				break;
+			}
 			default:
 			{
 				HandleTopLevelExpression();
 				break;
 			}
 		}
+		if (CurTok == tok_exit)
+			break;
 	}
+
+	// Initialize the target registry etc.
+	InitializeAllTargetInfos();
+	InitializeAllTargets();
+	InitializeAllTargetMCs();
+	InitializeAllAsmParsers();
+	InitializeAllAsmPrinters();
+
+	auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+	TheModule->setTargetTriple(TargetTriple);
+
+	std::string Error;
+	auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+
+	// Print an error and exit if we couldn't find the requested target.
+	// This generally occurs if we've forgotten to initialise the
+	// TargetRegistry or we have a bogus target triple.
+	if (!Target)
+	{
+		errs() << Error;
+		return 1;
+	}
+
+	auto CPU = "generic";
+	auto Features = "";
+
+	TargetOptions opt;
+	auto RM = std::optional<Reloc::Model>();
+	auto TheTargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+
+	TheModule->setDataLayout(TheTargetMachine->createDataLayout());
+
+	auto Filename = "output.o";
+	std::error_code EC;
+	raw_fd_ostream dest(Filename, EC, sys::fs::OF_None);
+
+	if (EC)
+	{
+		errs() << "Could not open file: " << EC.message();
+		return 1;
+	}
+
+	legacy::PassManager pass;
+	auto FileType = CodeGenFileType::CGFT_ObjectFile;
+
+	if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType))
+	{
+		errs() << "TheTargetMachine can't emit a file of this type";
+		return 1;
+	}
+
+	pass.run(*TheModule);
+	dest.flush();
+
+	outs() << "Wrote " << Filename << "\n";
+
+	return 0;
 }

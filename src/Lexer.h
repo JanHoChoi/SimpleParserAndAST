@@ -26,6 +26,7 @@ enum Token {
 	tok_binary = -11,	// 二元运算符
 	tok_unary = -12,	// 一元运算符
 	tok_var = -13,		// 局部变量
+	tok_exit = -99,
 };
 
 static std::string IdentifierStr;
@@ -71,6 +72,8 @@ static int GetToken() {
 			return Token::tok_unary;
 		if (IdentifierStr == "var")
 			return Token::tok_var;
+		if (IdentifierStr == "exit")
+			return Token::tok_exit;
 		return tok_identifier;
 	}
 
