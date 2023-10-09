@@ -87,6 +87,12 @@ void InitializeModuleAndPassManager()
 	TheFPM->add(llvm::createInstructionCombiningPass());
 	TheFPM->add(llvm::createGVNPass());
 	TheFPM->add(llvm::createCFGSimplificationPass());
+	// Promote allocas to registers.
+	TheFPM->add(llvm::createPromoteMemoryToRegisterPass());
+	// Do simple "peephole" optimizations and bit-twiddling optzns.
+	TheFPM->add(createInstructionCombiningPass());
+	// Reassociate expressions.
+	TheFPM->add(createReassociatePass());
 	TheFPM->doInitialization();
 }
 

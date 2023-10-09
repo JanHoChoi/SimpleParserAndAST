@@ -32,6 +32,7 @@ llvm_map_components_to_libnames(llvm_libs
 	object
 	runtimedyld
 	native
+	transformutils
 	)
 
 # Link against LLVM libraries

@@ -25,6 +25,7 @@ enum Token {
 	tok_in = -10,
 	tok_binary = -11,	// 二元运算符
 	tok_unary = -12,	// 一元运算符
+	tok_var = -13,		// 局部变量
 };
 
 static std::string IdentifierStr;
@@ -68,6 +69,8 @@ static int GetToken() {
 			return Token::tok_binary;
 		if (IdentifierStr == "unary")
 			return Token::tok_unary;
+		if (IdentifierStr == "var")
+			return Token::tok_var;
 		return tok_identifier;
 	}
 
@@ -138,6 +141,7 @@ static std::unique_ptr<ExprAST> ParseParenExpr();
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
 static std::unique_ptr<ExprAST> ParseIfExpr();
 static std::unique_ptr<ExprAST> ParseForExpr();
+static std::unique_ptr<ExprAST> ParseVarExpr();
 
 /// primary
 ///   ::= identifierexpr
@@ -160,6 +164,8 @@ static std::unique_ptr<ExprAST> ParsePrimary()
 		return ParseIfExpr();
 	case tok_for:
 		return ParseForExpr();
+	case tok_var:
+		return ParseVarExpr();
 	}
 }
 
@@ -364,6 +370,57 @@ static std::unique_ptr<ExprAST> ParseForExpr()
 		return nullptr;
 
 	return std::make_unique<ForExprAST>(IdName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
+}
+
+/// varexpr ::= 'var' identifier ('=' expression)?
+//                    (',' identifier ('=' expression)?)* 'in' expression
+static std::unique_ptr<ExprAST> ParseVarExpr()
+{
+	GetNextToken(); // eat the var.
+
+	std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+
+	// At least one variable name is required.
+	if (CurTok != tok_identifier)
+		return LogError("expected identifier after var");
+
+	while (true)
+	{
+		std::string Name = IdentifierStr;
+		GetNextToken(); // eat identifier.
+
+		// Read the optional initializer.
+		std::unique_ptr<ExprAST> Init = nullptr;
+		if (CurTok == '=')
+		{
+			GetNextToken(); // eat the '='.
+
+			Init = ParseExpression();
+			if (!Init)
+				return nullptr;
+		}
+
+		VarNames.push_back(std::make_pair(Name, std::move(Init)));
+
+		// End of var list, exit loop.
+		if (CurTok != ',')
+			break;
+		GetNextToken(); // eat the ','.
+
+		if (CurTok != tok_identifier)
+			return LogError("expected identifier list after var");
+	}
+
+	// At this point, we have to have 'in'.
+	if (CurTok != tok_in)
+		return LogError("expected 'in' keyword after 'var'");
+	GetNextToken(); // eat 'in'.
+
+	auto Body = ParseExpression();
+	if (!Body)
+		return nullptr;
+
+	return std::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 }
 
 /// prototypeexpr ::= identifier '(' identifier* ')'
